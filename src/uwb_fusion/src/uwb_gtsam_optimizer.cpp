@@ -10,13 +10,11 @@
 #include <gtsam/nonlinear/ExpressionFactor.h>
 #include <gtsam/slam/expressions.h>
 
-// Symbol shorthand
 using gtsam::symbol_shorthand::V;
 using gtsam::symbol_shorthand::X;
 
 namespace uwb_fusion {
 
-// Helper function
 gtsam::Point3 positionFromPose(const gtsam::Pose3& p, gtsam::OptionalJacobian<3, 6> H) {
   return p.translation(H);
 }
@@ -32,23 +30,20 @@ UwbGtsamOptimizer::UwbGtsamOptimizer(ros::NodeHandle& nh,
   nh_private.param("blind_cov_thresh", blind_cov_thresh_, 1.0);
   nh_private.param("map_frame", map_frame_, std::string("map"));
 
-  // Person Tracking Parameters - REASONABLE VALUES
-  nh_private.param("noise_elev_sigma", noise_elev_sigma_, 30.0);    // degrees
-  nh_private.param("person_vel_sigma", person_vel_sigma_, 0.5);     // m/s² acceleration
+  nh_private.param("noise_elev_sigma", noise_elev_sigma_, 30.0);
+  nh_private.param("person_vel_sigma", person_vel_sigma_, 0.5);
   nh_private.param("person_z_vel_sigma", person_z_vel_sigma_, 0.05); 
   
-  // Low Pass Filter Gain
-  nh_private.param("lpf_gain", lpf_gain_, 0.2);
+  // NEW: Butterworth filter parameters
+  nh_private.param("lpf_cutoff_freq", lpf_cutoff_freq_, 2.0);   // 2 Hz cutoff (good for walking)
+  nh_private.param("lpf_sample_freq", lpf_sample_freq_, 20.0);  // Expected UWB rate ~20 Hz
 
-  // [NEW] Synchronization parameters
-  nh_private.param("measurement_sync_window", measurement_sync_window_, 0.1); // 100ms
-  nh_private.param("update_rate", update_rate_, 20.0); // 20 Hz
+  nh_private.param("measurement_sync_window", measurement_sync_window_, 0.1);
+  nh_private.param("update_rate", update_rate_, 20.0);
 
-  // Keyframe parameters
   nh_private.param("keyframe_distance_thresh", keyframe_distance_thresh_, 0.05);
   nh_private.param("keyframe_time_thresh", keyframe_time_thresh_, 0.05); 
 
-  // Legacy parameters
   nh_private.param("z_velocity_sigma", z_velocity_sigma_, 0.03);  
   nh_private.param("z_acceleration_sigma", z_acceleration_sigma_, 0.05);  
 
@@ -58,8 +53,6 @@ UwbGtsamOptimizer::UwbGtsamOptimizer(ros::NodeHandle& nh,
   nh_private.param("topic_uwb_right", topic_uwb_right, std::string("/uwb/anchor_right/raw"));
   
   // 2. Initialize ROS Communication
-  
-  // Legacy subscribers (kept for compatibility)
   sub_uwb_left_ = nh_.subscribe<geometry_msgs::PoseStamped>(
       "/uwb/anchor_left/pose", 10,
       boost::bind(&UwbGtsamOptimizer::UwbCallback, this, _1, "anchor_left_link"));
@@ -71,7 +64,6 @@ UwbGtsamOptimizer::UwbGtsamOptimizer(ros::NodeHandle& nh,
   sub_simple_ = nh_.subscribe<geometry_msgs::PoseStamped>(
       "/uwb/pose", 10, &UwbGtsamOptimizer::SimplePathCallback, this);
 
-  // Raw data subscribers
   ROS_INFO("Subscribing to Raw UWB Left: %s", topic_uwb_left.c_str());
   sub_raw_left_ = nh_.subscribe<std_msgs::Int32MultiArray>(
       topic_uwb_left, 10,
@@ -97,20 +89,21 @@ UwbGtsamOptimizer::UwbGtsamOptimizer(ros::NodeHandle& nh,
 
   // 3. Configure ISAM2
   gtsam::ISAM2Params params;
-  params.relinearizeThreshold = 0.01;  // More frequent relinearization
+  params.relinearizeThreshold = 0.01;
   params.relinearizeSkip = 1;
   isam_ = gtsam::ISAM2(params);
 
   last_velocity_ = gtsam::Vector3::Zero();
 
-  // [NEW] Start timer for synchronized updates
   update_timer_ = nh_.createTimer(ros::Duration(1.0 / update_rate_), 
                                    &UwbGtsamOptimizer::TimerCallback, this);
 
   ROS_INFO("Stereo UWB Optimizer Initialized in frame: %s", map_frame_.c_str());
   ROS_INFO("  - Update rate: %.1f Hz", update_rate_);
   ROS_INFO("  - Sync window: %.3f s", measurement_sync_window_);
-  ROS_INFO("  - Person velocity sigma: %.2f m/s", person_vel_sigma_);
+  ROS_INFO("  - Person velocity sigma: %.2f m/s²", person_vel_sigma_);
+  ROS_INFO("  - LPF cutoff frequency: %.1f Hz (sample freq: %.1f Hz)", 
+           lpf_cutoff_freq_, lpf_sample_freq_);
 }
 
 // ===========================================================================
@@ -122,7 +115,6 @@ gtsam::SharedNoiseModel UwbGtsamOptimizer::CreateRobustNoiseModel(double azimuth
   double abs_az = std::abs(azimuth);
   double ratio = std::min(abs_az / fov_half_rad, 1.0);
 
-  // Smoother penalty function
   double penalty_factor = 1.0 + 4.0 * std::pow(ratio, 3);
   if (abs_az > fov_half_rad) penalty_factor = 50.0; 
 
@@ -139,7 +131,7 @@ gtsam::SharedNoiseModel UwbGtsamOptimizer::CreateRobustNoiseModel(double azimuth
 }
 
 // ===========================================================================
-// RAW CALLBACK - Now just stores measurements, doesn't update
+// RAW CALLBACK - With proper Butterworth filtering
 // ===========================================================================
 void UwbGtsamOptimizer::RawUwbCallback(
     const ros::MessageEvent<std_msgs::Int32MultiArray const>& event,
@@ -152,7 +144,7 @@ void UwbGtsamOptimizer::RawUwbCallback(
   // 1. Parse Data
   if (msg->data.size() < 3) return;
   double raw_r_cm  = msg->data[0];
-  double raw_az_deg = -msg->data[1];  // Sign convention
+  double raw_az_deg = -msg->data[1];
   double raw_el_deg = msg->data[2];
 
   // 2. Coordinate Conversion
@@ -160,29 +152,25 @@ void UwbGtsamOptimizer::RawUwbCallback(
   double az_inst = raw_az_deg * M_PI / 180.0; 
   double el_inst = raw_el_deg * M_PI / 180.0;   
 
-  // 3. Apply Low Pass Filter
-  LpfState& state = lpf_states_[anchor_frame_id];
-  double r_final, az_final, el_final; 
-
-  if (!state.is_initialized) {
-      state.range = r_inst; 
-      state.azimuth = az_inst; 
-      state.elevation = el_inst;
-      state.is_initialized = true;
-  } else {
-      state.range     = lpf_gain_ * r_inst  + (1.0 - lpf_gain_) * state.range;
-      state.azimuth   = lpf_gain_ * az_inst + (1.0 - lpf_gain_) * state.azimuth;
-      state.elevation = lpf_gain_ * el_inst + (1.0 - lpf_gain_) * state.elevation;
+  // 3. NEW: Apply proper Butterworth Low Pass Filter
+  SphericalLPF& filter = spherical_filters_[anchor_frame_id];
+  
+  // Initialize filter on first use
+  if (!filter.isInitialized()) {
+    filter.initialize(lpf_sample_freq_, lpf_cutoff_freq_);
+    filter.initializeState(r_inst, az_inst, el_inst);
+    ROS_INFO("Initialized Butterworth LPF for %s (cutoff: %.1f Hz)", 
+             anchor_frame_id.c_str(), lpf_cutoff_freq_);
   }
-  r_final = state.range; 
-  az_final = state.azimuth; 
-  el_final = state.elevation;
+
+  double r_final, az_final, el_final;
+  filter.filter(r_inst, az_inst, el_inst, r_final, az_final, el_final);
 
   // 4. Lookup Sensor Pose
   tf::StampedTransform tf_map_sensor;
   try {
     tf_listener_.lookupTransform(map_frame_, anchor_frame_id, 
-                                 ros::Time(0), tf_map_sensor);  // Use latest
+                                 ros::Time(0), tf_map_sensor);
   } catch (tf::TransformException& ex) {
     ROS_WARN_THROTTLE(2, "TF Error: %s", ex.what());
     return;
@@ -229,7 +217,7 @@ void UwbGtsamOptimizer::RawUwbCallback(
       pub_raw_path_right_.publish(raw_path_right_);
   }
 
-  // 5. [NEW] Store measurement for synchronized fusion
+  // 5. Store measurement for synchronized fusion
   {
     std::lock_guard<std::mutex> lock(measurement_mutex_);
     
@@ -384,17 +372,9 @@ void UwbGtsamOptimizer::TimerCallback(const ros::TimerEvent& event) {
   CheckAndPublish(current_time);
 }
 
-// ===========================================================================
-// LEGACY: PerformPersonUpdate (kept for compatibility, redirects to timer logic)
-// ===========================================================================
 void UwbGtsamOptimizer::PerformPersonUpdate(double dt) {
-  // This is now handled by TimerCallback
-  // Keeping method signature for compatibility
+  // Handled by TimerCallback
 }
-
-// ===========================================================================
-// LEGACY METHODS (Unchanged)
-// ===========================================================================
 
 gtsam::SharedNoiseModel UwbGtsamOptimizer::GetDynamicNoiseModel(
     const gtsam::Point3& local_point,
@@ -472,16 +452,15 @@ void UwbGtsamOptimizer::InitializeSystem(double time, const gtsam::Point3& initi
   last_pose_ = gtsam::Pose3(gtsam::Rot3(), initial_pos);
   last_velocity_ = gtsam::Vector3::Zero();
   
-  // FIX: Create actual Vector3, not lazy expression
   gtsam::Vector3 zero_velocity = gtsam::Vector3::Zero();
   
   initial_estimate_.insert(X(0), last_pose_);
-  initial_estimate_.insert(V(0), zero_velocity);  // Use the actual vector
+  initial_estimate_.insert(V(0), zero_velocity);
 
   graph_.add(gtsam::PriorFactor<gtsam::Pose3>(
       X(0), last_pose_, gtsam::noiseModel::Isotropic::Sigma(6, 0.5)));
   graph_.add(gtsam::PriorFactor<gtsam::Vector3>(
-      V(0), zero_velocity,  // Use the actual vector
+      V(0), zero_velocity,
       gtsam::noiseModel::Isotropic::Sigma(3, 0.5)));
 
   isam_.update(graph_, initial_estimate_);
@@ -489,7 +468,7 @@ void UwbGtsamOptimizer::InitializeSystem(double time, const gtsam::Point3& initi
   graph_.resize(0);
   initial_estimate_.clear();
 
-  last_time_ = time;  // FIX: was "last_time"
+  last_time_ = time;
   is_initialized_ = true;
   ROS_INFO("System Initialized at (%.2f, %.2f, %.2f)", 
            initial_pos.x(), initial_pos.y(), initial_pos.z());
@@ -497,7 +476,6 @@ void UwbGtsamOptimizer::InitializeSystem(double time, const gtsam::Point3& initi
 
 void UwbGtsamOptimizer::PerformUpdate(double dt, const gtsam::Point3& meas_global,
                                       const gtsam::SharedNoiseModel& noise_model) {
-  // Legacy method - kept for PoseStamped callback
   double time_from_last = (last_time_ + dt) - last_keyframe_time_;
   
   if (time_from_last < keyframe_time_thresh_) {
@@ -510,9 +488,12 @@ void UwbGtsamOptimizer::PerformUpdate(double dt, const gtsam::Point3& meas_globa
 
   double pos_noise = 1.0 * dt; 
   double vel_noise = 1.0 * dt; 
-  gtsam::Vector3 vel_sigmas(vel_noise, vel_noise, z_velocity_sigma_ * dt);
+  gtsam::Vector3 vel_sigmas;
+  vel_sigmas << vel_noise, vel_noise, z_velocity_sigma_ * dt;
+  
+  gtsam::Vector3 zero_vel = gtsam::Vector3::Zero();
   graph_.add(gtsam::BetweenFactor<gtsam::Vector3>(
-      V(current_key_ - 1), V(current_key_), gtsam::Vector3::Zero(),
+      V(current_key_ - 1), V(current_key_), zero_vel,
       gtsam::noiseModel::Diagonal::Sigmas(vel_sigmas)));
 
   gtsam::Vector3 pred_move = last_velocity_ * dt;

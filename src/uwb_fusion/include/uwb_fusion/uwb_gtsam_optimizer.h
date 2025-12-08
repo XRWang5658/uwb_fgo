@@ -22,18 +22,11 @@
 #include <gtsam/nonlinear/Values.h>
 
 #include "uwb_fusion/uwb_pdoa_factor.h"
+#include "uwb_fusion/butterworth_lpf.h"  // NEW: Proper filter
 
 namespace uwb_fusion {
 
-// Low Pass Filter State
-struct LpfState {
-    double range = 0.0;
-    double azimuth = 0.0;
-    double elevation = 0.0;
-    bool is_initialized = false;
-};
-
-// [NEW] Pending measurement for synchronization
+// Pending measurement for synchronization
 struct PendingMeasurement {
     gtsam::Pose3 sensor_pose;
     double range;
@@ -73,7 +66,6 @@ class UwbGtsamOptimizer {
   
   ros::Publisher pub_raw_attitude_; 
 
-  // [NEW] Timer for synchronized updates
   ros::Timer update_timer_;
 
   // --- GTSAM Components ---
@@ -89,11 +81,11 @@ class UwbGtsamOptimizer {
   gtsam::Pose3 last_pose_;
   gtsam::Vector3 last_velocity_;
 
-  // [NEW] Pending measurements for fusion
+  // Pending measurements for fusion
   std::mutex measurement_mutex_;
   PendingMeasurement pending_left_;
   PendingMeasurement pending_right_;
-  double measurement_sync_window_;  // Time window to consider measurements "simultaneous"
+  double measurement_sync_window_;
 
   // --- Parameters ---
   double fov_limit_deg_;     
@@ -106,9 +98,10 @@ class UwbGtsamOptimizer {
   double person_vel_sigma_;    
   double person_z_vel_sigma_;  
 
-  // Low Pass Filter
-  double lpf_gain_; 
-  std::map<std::string, LpfState> lpf_states_;
+  // NEW: Proper Butterworth filters (one per sensor)
+  double lpf_cutoff_freq_;  // Cutoff frequency in Hz
+  double lpf_sample_freq_;  // Expected sample frequency in Hz
+  std::map<std::string, SphericalLPF> spherical_filters_;
 
   // Keyframe selection parameters
   double keyframe_distance_thresh_;  
@@ -119,7 +112,6 @@ class UwbGtsamOptimizer {
   double z_velocity_sigma_;       
   double z_acceleration_sigma_;   
 
-  // [NEW] Update rate
   double update_rate_;
 
   // --- Methods ---
@@ -131,7 +123,6 @@ class UwbGtsamOptimizer {
   void RawUwbCallback(const ros::MessageEvent<std_msgs::Int32MultiArray const>& event,
                       const std::string& anchor_frame_id);
 
-  // [NEW] Timer callback for synchronized updates
   void TimerCallback(const ros::TimerEvent& event);
 
   void PerformPersonUpdate(double current_time);
@@ -147,7 +138,6 @@ class UwbGtsamOptimizer {
 
   void CheckAndPublish(double time_stamp);
 
-  // [NEW] Helper to create noise model
   gtsam::SharedNoiseModel CreateRobustNoiseModel(double azimuth);
 };
 
