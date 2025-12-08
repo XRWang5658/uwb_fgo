@@ -13,6 +13,7 @@
 #include <string>
 #include <memory>
 #include <map>
+#include <mutex>
 
 // GTSAM Includes
 #include <gtsam/geometry/Pose3.h>
@@ -30,6 +31,16 @@ struct LpfState {
     double azimuth = 0.0;
     double elevation = 0.0;
     bool is_initialized = false;
+};
+
+// [NEW] Pending measurement for synchronization
+struct PendingMeasurement {
+    gtsam::Pose3 sensor_pose;
+    double range;
+    double azimuth;
+    double elevation;
+    double timestamp;
+    bool valid = false;
 };
 
 class UwbGtsamOptimizer {
@@ -54,15 +65,16 @@ class UwbGtsamOptimizer {
   ros::Publisher pub_attitude_;
   nav_msgs::Path optimized_path_;
   
-  // [NEW] Separate Publishers for Visualization
   ros::Publisher pub_raw_path_left_;      
   ros::Publisher pub_raw_path_right_;
   
-  // [NEW] Separate Path Containers
   nav_msgs::Path raw_path_left_;          
   nav_msgs::Path raw_path_right_;
   
   ros::Publisher pub_raw_attitude_; 
+
+  // [NEW] Timer for synchronized updates
+  ros::Timer update_timer_;
 
   // --- GTSAM Components ---
   gtsam::ISAM2 isam_;
@@ -76,6 +88,12 @@ class UwbGtsamOptimizer {
   
   gtsam::Pose3 last_pose_;
   gtsam::Vector3 last_velocity_;
+
+  // [NEW] Pending measurements for fusion
+  std::mutex measurement_mutex_;
+  PendingMeasurement pending_left_;
+  PendingMeasurement pending_right_;
+  double measurement_sync_window_;  // Time window to consider measurements "simultaneous"
 
   // --- Parameters ---
   double fov_limit_deg_;     
@@ -101,6 +119,9 @@ class UwbGtsamOptimizer {
   double z_velocity_sigma_;       
   double z_acceleration_sigma_;   
 
+  // [NEW] Update rate
+  double update_rate_;
+
   // --- Methods ---
   void UwbCallback(const geometry_msgs::PoseStamped::ConstPtr& msg,
                    const std::string& anchor_frame_id);
@@ -110,7 +131,10 @@ class UwbGtsamOptimizer {
   void RawUwbCallback(const ros::MessageEvent<std_msgs::Int32MultiArray const>& event,
                       const std::string& anchor_frame_id);
 
-  void PerformPersonUpdate(double dt);
+  // [NEW] Timer callback for synchronized updates
+  void TimerCallback(const ros::TimerEvent& event);
+
+  void PerformPersonUpdate(double current_time);
 
   gtsam::SharedNoiseModel GetDynamicNoiseModel(
       const gtsam::Point3& local_point,
@@ -122,6 +146,9 @@ class UwbGtsamOptimizer {
   void InitializeSystem(double time, const gtsam::Point3& initial_pos);
 
   void CheckAndPublish(double time_stamp);
+
+  // [NEW] Helper to create noise model
+  gtsam::SharedNoiseModel CreateRobustNoiseModel(double azimuth);
 };
 
 }  // namespace uwb_fusion
