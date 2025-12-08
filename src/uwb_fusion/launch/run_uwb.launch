@@ -28,7 +28,7 @@
         
         <!-- NEW: Butterworth Low-Pass Filter settings -->
         <param name="lpf_cutoff_freq" value="5.0"/>   <!-- 2 Hz: good for walking (removes >2Hz noise) -->
-        <param name="lpf_sample_freq" value="30.0"/>  <!-- Expected UWB sample rate -->
+        <param name="lpf_sample_freq" value="40.0"/>  <!-- Expected UWB sample rate -->
         
         <!-- Synchronization -->
         <param name="measurement_sync_window" value="0.1"/>
