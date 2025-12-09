@@ -66,6 +66,12 @@ class UwbGtsamOptimizer {
   
   ros::Publisher pub_raw_attitude_; 
 
+  ros::Publisher pub_unfiltered_path_left_;  // Unfiltered path for left anchor
+  ros::Publisher pub_unfiltered_path_right_; // Unfiltered path for right anchor
+
+  nav_msgs::Path unfiltered_path_left_;  // Store unfiltered measurements (left)
+  nav_msgs::Path unfiltered_path_right_; // Store unfiltered measurements (right)
+
   ros::Timer update_timer_;
 
   // --- GTSAM Components ---

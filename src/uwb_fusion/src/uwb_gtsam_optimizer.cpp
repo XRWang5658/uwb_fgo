@@ -87,6 +87,13 @@ UwbGtsamOptimizer::UwbGtsamOptimizer(ros::NodeHandle& nh,
   pub_attitude_ = nh_.advertise<geometry_msgs::QuaternionStamped>("/uwb_optimized/attitude", 10);
   optimized_path_.header.frame_id = map_frame_;
 
+  // Publishers for unfiltered measurements
+  pub_unfiltered_path_left_ = nh_.advertise<nav_msgs::Path>("/uwb_raw/unfiltered_left", 10);
+  pub_unfiltered_path_right_ = nh_.advertise<nav_msgs::Path>("/uwb_raw/unfiltered_right", 10);
+
+  unfiltered_path_left_.header.frame_id = map_frame_;
+  unfiltered_path_right_.header.frame_id = map_frame_;
+
   // 3. Configure ISAM2
   gtsam::ISAM2Params params;
   params.relinearizeThreshold = 0.01;
@@ -152,21 +159,7 @@ void UwbGtsamOptimizer::RawUwbCallback(
   double az_inst = raw_az_deg * M_PI / 180.0; 
   double el_inst = raw_el_deg * M_PI / 180.0;   
 
-  // 3. NEW: Apply proper Butterworth Low Pass Filter
-  SphericalLPF& filter = spherical_filters_[anchor_frame_id];
-  
-  // Initialize filter on first use
-  if (!filter.isInitialized()) {
-    filter.initialize(lpf_sample_freq_, lpf_cutoff_freq_);
-    filter.initializeState(r_inst, az_inst, el_inst);
-    ROS_INFO("Initialized Butterworth LPF for %s (cutoff: %.1f Hz)", 
-             anchor_frame_id.c_str(), lpf_cutoff_freq_);
-  }
-
-  double r_final, az_final, el_final;
-  filter.filter(r_inst, az_inst, el_inst, r_final, az_final, el_final);
-
-  // 4. Lookup Sensor Pose
+  // 3. Lookup Sensor Pose
   tf::StampedTransform tf_map_sensor;
   try {
     tf_listener_.lookupTransform(map_frame_, anchor_frame_id, 
@@ -183,10 +176,49 @@ void UwbGtsamOptimizer::RawUwbCallback(
                     tf_map_sensor.getOrigin().z())
   );
 
+  // --- VISUALIZATION: Unfiltered Measurements ---
+  double lx = r_inst * std::cos(az_inst) * std::cos(el_inst);
+  double ly = r_inst * std::sin(az_inst) * std::cos(el_inst);
+  double lz = r_inst * std::sin(el_inst);
+  gtsam::Point3 global_unfiltered_pt = sensor_pose_global.transformFrom(gtsam::Point3(lx, ly, lz));
+
+  geometry_msgs::PoseStamped unfiltered_pose;
+  unfiltered_pose.header.stamp = current_ros_time;
+  unfiltered_pose.header.frame_id = map_frame_;
+  unfiltered_pose.pose.position.x = global_unfiltered_pt.x();
+  unfiltered_pose.pose.position.y = global_unfiltered_pt.y();
+  unfiltered_pose.pose.position.z = global_unfiltered_pt.z();
+
+  bool is_left = (anchor_frame_id.find("left") != std::string::npos);
+  if (is_left) {
+      unfiltered_path_left_.poses.push_back(unfiltered_pose);
+      if (unfiltered_path_left_.poses.size() > 100) unfiltered_path_left_.poses.erase(unfiltered_path_left_.poses.begin());
+      unfiltered_path_left_.header.stamp = current_ros_time;
+      pub_unfiltered_path_left_.publish(unfiltered_path_left_);
+  } else {
+      unfiltered_path_right_.poses.push_back(unfiltered_pose);
+      if (unfiltered_path_right_.poses.size() > 100) unfiltered_path_right_.poses.erase(unfiltered_path_right_.poses.begin());
+      unfiltered_path_right_.header.stamp = current_ros_time;
+      pub_unfiltered_path_right_.publish(unfiltered_path_right_);
+  }
+
+  // --- Apply Low Pass Filter ---
+  SphericalLPF& filter = spherical_filters_[anchor_frame_id];
+  if (!filter.isInitialized()) {
+    filter.initialize(lpf_sample_freq_, lpf_cutoff_freq_);
+    filter.initializeState(r_inst, az_inst, el_inst);
+    ROS_INFO("Initialized Butterworth LPF for %s (cutoff: %.1f Hz)", 
+             anchor_frame_id.c_str(), lpf_cutoff_freq_);
+  }
+
+  double r_final, az_final, el_final;
+  filter.filter(r_inst, az_inst, el_inst, r_final, az_final, el_final);
+
+  // --- Continue with filtered measurements ---
   // --- VISUALIZATION ---
-  double lx = r_final * std::cos(az_final) * std::cos(el_final);
-  double ly = r_final * std::sin(az_final) * std::cos(el_final);
-  double lz = r_final * std::sin(el_final);
+  // double lx = r_final * std::cos(az_final) * std::cos(el_final);
+  // double ly = r_final * std::sin(az_final) * std::cos(el_final);
+  // double lz = r_final * std::sin(el_final);
   gtsam::Point3 global_filtered_pt = sensor_pose_global.transformFrom(gtsam::Point3(lx, ly, lz));
 
   geometry_msgs::PoseStamped filtered_pose;
@@ -204,15 +236,15 @@ void UwbGtsamOptimizer::RawUwbCallback(
   filtered_pose.pose.orientation.y = q_vis.y();
   filtered_pose.pose.orientation.z = q_vis.z();
 
-  bool is_left = (anchor_frame_id.find("left") != std::string::npos);
+  // bool is_left = (anchor_frame_id.find("left") != std::string::npos);
   if (is_left) {
       raw_path_left_.poses.push_back(filtered_pose);
-      if (raw_path_left_.poses.size() > 2000) raw_path_left_.poses.erase(raw_path_left_.poses.begin());
+      if (raw_path_left_.poses.size() > 100) raw_path_left_.poses.erase(raw_path_left_.poses.begin());
       raw_path_left_.header.stamp = current_ros_time;
       pub_raw_path_left_.publish(raw_path_left_);
   } else {
       raw_path_right_.poses.push_back(filtered_pose);
-      if (raw_path_right_.poses.size() > 2000) raw_path_right_.poses.erase(raw_path_right_.poses.begin());
+      if (raw_path_right_.poses.size() > 100) raw_path_right_.poses.erase(raw_path_right_.poses.begin());
       raw_path_right_.header.stamp = current_ros_time;
       pub_raw_path_right_.publish(raw_path_right_);
   }
@@ -556,7 +588,7 @@ void UwbGtsamOptimizer::CheckAndPublish(double time_stamp) {
     pose_stamped.pose.orientation.z = q.z();
 
     optimized_path_.poses.push_back(pose_stamped);
-    if (optimized_path_.poses.size() > 5000) {
+    if (optimized_path_.poses.size() > 100) {
       optimized_path_.poses.erase(optimized_path_.poses.begin());
     }
     optimized_path_.header.stamp = ros::Time(time_stamp);
