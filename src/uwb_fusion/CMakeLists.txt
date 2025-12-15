@@ -32,7 +32,13 @@ add_executable(uwb_optimizer_node
   src/uwb_gtsam_optimizer.cpp
 )
 
+add_executable(uwb_baseline_visualizer src/uwb_baseline_visualizer.cpp)
+
 target_link_libraries(uwb_optimizer_node
   ${catkin_LIBRARIES}
   gtsam
+)
+
+target_link_libraries(uwb_baseline_visualizer
+  ${catkin_LIBRARIES}
 )

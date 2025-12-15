@@ -22,7 +22,7 @@
 #include <gtsam/nonlinear/Values.h>
 
 #include "uwb_fusion/uwb_pdoa_factor.h"
-#include "uwb_fusion/butterworth_lpf.h"  // NEW: Proper filter
+#include "uwb_fusion/butterworth_lpf.h"
 
 namespace uwb_fusion {
 
@@ -104,7 +104,7 @@ class UwbGtsamOptimizer {
   double person_vel_sigma_;    
   double person_z_vel_sigma_;  
 
-  // NEW: Proper Butterworth filters (one per sensor)
+  // Butterworth filters (one per sensor)
   double lpf_cutoff_freq_;  // Cutoff frequency in Hz
   double lpf_sample_freq_;  // Expected sample frequency in Hz
   std::map<std::string, SphericalLPF> spherical_filters_;
@@ -123,15 +123,11 @@ class UwbGtsamOptimizer {
   // --- Methods ---
   void UwbCallback(const geometry_msgs::PoseStamped::ConstPtr& msg,
                    const std::string& anchor_frame_id);
-
-  void SimplePathCallback(const geometry_msgs::PoseStamped::ConstPtr& msg);
   
   void RawUwbCallback(const ros::MessageEvent<std_msgs::Int32MultiArray const>& event,
                       const std::string& anchor_frame_id);
 
   void TimerCallback(const ros::TimerEvent& event);
-
-  void PerformPersonUpdate(double current_time);
 
   gtsam::SharedNoiseModel GetDynamicNoiseModel(
       const gtsam::Point3& local_point,

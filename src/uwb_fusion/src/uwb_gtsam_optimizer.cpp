@@ -2,6 +2,7 @@
 
 #include <tf_conversions/tf_eigen.h>
 #include <cmath>
+#include <fstream>
 
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/slam/BetweenFactor.h>
@@ -34,9 +35,9 @@ UwbGtsamOptimizer::UwbGtsamOptimizer(ros::NodeHandle& nh,
   nh_private.param("person_vel_sigma", person_vel_sigma_, 0.5);
   nh_private.param("person_z_vel_sigma", person_z_vel_sigma_, 0.05); 
   
-  // NEW: Butterworth filter parameters
-  nh_private.param("lpf_cutoff_freq", lpf_cutoff_freq_, 2.0);   // 2 Hz cutoff (good for walking)
-  nh_private.param("lpf_sample_freq", lpf_sample_freq_, 20.0);  // Expected UWB rate ~20 Hz
+  // Butterworth filter parameters
+  nh_private.param("lpf_cutoff_freq", lpf_cutoff_freq_, 2.0);   // 2 Hz cutoff (2-8hz depends on motion mode, 2hz for slow walking)
+  nh_private.param("lpf_sample_freq", lpf_sample_freq_, 20.0);  // UWB sampling rate
 
   nh_private.param("measurement_sync_window", measurement_sync_window_, 0.1);
   nh_private.param("update_rate", update_rate_, 20.0);
@@ -60,9 +61,6 @@ UwbGtsamOptimizer::UwbGtsamOptimizer(ros::NodeHandle& nh,
   sub_uwb_right_ = nh_.subscribe<geometry_msgs::PoseStamped>(
       "/uwb/anchor_right/pose", 10,
       boost::bind(&UwbGtsamOptimizer::UwbCallback, this, _1, "anchor_right_link"));
-  
-  sub_simple_ = nh_.subscribe<geometry_msgs::PoseStamped>(
-      "/uwb/pose", 10, &UwbGtsamOptimizer::SimplePathCallback, this);
 
   ROS_INFO("Subscribing to Raw UWB Left: %s", topic_uwb_left.c_str());
   sub_raw_left_ = nh_.subscribe<std_msgs::Int32MultiArray>(
@@ -404,10 +402,6 @@ void UwbGtsamOptimizer::TimerCallback(const ros::TimerEvent& event) {
   CheckAndPublish(current_time);
 }
 
-void UwbGtsamOptimizer::PerformPersonUpdate(double dt) {
-  // Handled by TimerCallback
-}
-
 gtsam::SharedNoiseModel UwbGtsamOptimizer::GetDynamicNoiseModel(
     const gtsam::Point3& local_point,
     const tf::StampedTransform& tf_map_anchor) {
@@ -476,9 +470,6 @@ void UwbGtsamOptimizer::UwbCallback(
   last_time_ = current_time; 
 }
 
-void UwbGtsamOptimizer::SimplePathCallback(const geometry_msgs::PoseStamped::ConstPtr& msg) {
-  // Legacy - not used
-}
 
 void UwbGtsamOptimizer::InitializeSystem(double time, const gtsam::Point3& initial_pos) {
   last_pose_ = gtsam::Pose3(gtsam::Rot3(), initial_pos);
@@ -611,6 +602,15 @@ void UwbGtsamOptimizer::CheckAndPublish(double time_stamp) {
     odom.twist.twist.linear.y = last_velocity_.y();
     odom.twist.twist.linear.z = last_velocity_.z();
     pub_odom_.publish(odom);
+
+    // --- Write to CSV ---
+    static std::ofstream csv_file("/home/xiangru/code/uwb_ws/optimized_path.csv", std::ios::out);
+    if (csv_file.is_open()) {
+      csv_file << time_stamp << ","
+               << last_pose_.x() << ","
+               << last_pose_.y() << ","
+               << last_pose_.z() << "\n";
+    }
 
   } catch (gtsam::IndeterminantLinearSystemException& e) {
     ROS_ERROR("GTSAM Error: %s", e.what());
